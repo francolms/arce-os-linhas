@@ -528,7 +528,7 @@ def _fmt_valor_os(v):
 
 @st.dialog("Detalhes da OS")
 def dlg_ver_detalhes_os(row):
-    linhas_df = listar("linhas")
+    linhas_df = listar("linhas", order="codigo")
     usuarios_df = listar("usuarios")
     linha_atual = linhas_df.loc[linhas_df["codigo"] == row["linha_codigo"]]
     nome_linha = linha_atual["nome"].iloc[0] if not linha_atual.empty else "—"
