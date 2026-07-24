@@ -248,61 +248,7 @@ def dlg_del_lote(row):
         st.rerun()
 
 
-# ============================================================================
-# Normas
-# ============================================================================
-
 TIPOS_NORMA = ["OS", "Portaria", "Resolução", "Outro"]
-
-
-@st.dialog("Adicionar Norma")
-def dlg_add_norma():
-    tipo = st.selectbox("Tipo", TIPOS_NORMA)
-    numero = st.text_input("Número")
-    data_publicacao = st.date_input("Data de publicação", value=None)
-    descricao = st.text_area("Descrição")
-    if st.button("Adicionar", key="cf_add_norma"):
-        if not numero.strip():
-            st.warning("Informe o número.")
-        elif executar(lambda: sb.table("normas").insert({
-            "tipo": tipo,
-            "numero": numero.strip(),
-            "data_publicacao": str(data_publicacao) if data_publicacao else None,
-            "descricao": descricao.strip() or None,
-        }).execute()):
-            recarregar()
-
-
-@st.dialog("Editar Norma")
-def dlg_edit_norma(row):
-    tipo = st.selectbox("Tipo", TIPOS_NORMA, index=TIPOS_NORMA.index(row["tipo"]) if row["tipo"] in TIPOS_NORMA else 0)
-    numero = st.text_input("Número", value=row["numero"])
-    data_atual = pd.to_datetime(row["data_publicacao"]).date() if pd.notna(row.get("data_publicacao")) else None
-    data_publicacao = st.date_input("Data de publicação", value=data_atual)
-    descricao_atual = row["descricao"] if pd.notna(row.get("descricao")) else ""
-    descricao = st.text_area("Descrição", value=descricao_atual)
-    c1, c2 = st.columns(2)
-    if c1.button("Salvar", key=f"cf_edit_norma_{row['id']}"):
-        if executar(lambda: sb.table("normas").update({
-            "tipo": tipo,
-            "numero": numero.strip(),
-            "data_publicacao": str(data_publicacao) if data_publicacao else None,
-            "descricao": descricao.strip() or None,
-        }).eq("id", row["id"]).execute()):
-            recarregar()
-    if c2.button("Cancelar", key=f"cc_edit_norma_{row['id']}"):
-        st.rerun()
-
-
-@st.dialog("Excluir Norma")
-def dlg_del_norma(row):
-    st.warning(f"Excluir a norma **{row['tipo']} nº {row['numero']}**? Essa ação não pode ser desfeita.")
-    c1, c2 = st.columns(2)
-    if c1.button("Confirmar exclusão", key=f"cf_del_norma_{row['id']}"):
-        if executar(lambda: sb.table("normas").delete().eq("id", row["id"]).execute()):
-            recarregar()
-    if c2.button("Cancelar", key=f"cc_del_norma_{row['id']}"):
-        st.rerun()
 
 
 # ============================================================================
@@ -477,10 +423,15 @@ def dlg_nova_alteracao():
                 "tipo_linha_id": tipos_df, "especie_servico_id": especies_df,
                 "sistema_id": sistemas_df, "lote_id": lotes_df, "operador_id": operadores_df,
             }[campo_db]
-            valor_anterior = _nome_por_id(opcoes_df, linha_row.get(campo_db))
-            st.caption(f"Valor atual: {valor_anterior}")
+            id_anterior = linha_row.get(campo_db)
+            label_anterior = _nome_por_id(opcoes_df, id_anterior)
+            st.caption(f"Valor atual: {label_anterior}")
+            valor_anterior = {
+                "id": int(id_anterior) if pd.notna(id_anterior) else None,
+                "label": label_anterior,
+            }
             escolha = st.selectbox("Novo valor", opcoes_df["nome"] if not opcoes_df.empty else [])
-            valor_novo = _id_por_nome(opcoes_df, escolha)
+            valor_novo = {"id": _id_por_nome(opcoes_df, escolha), "label": escolha}
     else:
         valor_anterior = st.text_input("Valor/situação anterior (opcional)")
         valor_novo = st.text_area("O que está mudando")
@@ -488,7 +439,11 @@ def dlg_nova_alteracao():
     observacao = st.text_area("Observação (opcional)")
 
     if st.button("Criar alteração", key="cf_nova_alteracao"):
-        if tipo_db == "cadastral" and (valor_novo is None or valor_novo == ""):
+        novo_vazio = (
+            (isinstance(valor_novo, dict) and not valor_novo.get("id"))
+            or (not isinstance(valor_novo, dict) and not str(valor_novo or "").strip())
+        )
+        if tipo_db == "cadastral" and novo_vazio:
             st.warning("Informe o novo valor.")
             return
         if tipo_db != "cadastral" and not str(valor_novo).strip():
@@ -528,36 +483,84 @@ def dlg_cancelar_alteracao(row):
         st.rerun()
 
 
-@st.dialog("Concluir Alteração")
+@st.dialog("Concluir OS")
 def dlg_concluir_alteracao(row):
     st.write(f"Linha **{row['linha_codigo']}** — {TIPO_ALTERACAO_LABEL.get(row['tipo_alteracao'], row['tipo_alteracao'])}")
-    normas_df = listar("normas")
-    if normas_df.empty:
-        st.warning("Cadastre a norma antes (aba Normas).")
-        return
-    rotulos_norma = normas_df.apply(lambda r: f"{r['tipo']} nº {r['numero']}", axis=1)
-    escolha_norma = st.selectbox("Norma que validou a alteração", rotulos_norma)
-    norma_id = int(normas_df.loc[rotulos_norma == escolha_norma, "id"].iloc[0])
+    st.caption("Informe os dados da aprovação. Os dados da norma são opcionais — preencha se já houver uma publicada.")
+
     data_vigencia = st.date_input("Data de vigência")
+    tem_norma = st.checkbox("Já existe norma publicada para vincular a esta OS")
+    norma_tipo = norma_numero = norma_data_publicacao = None
+    if tem_norma:
+        norma_tipo = st.selectbox("Tipo de norma", TIPOS_NORMA)
+        norma_numero = st.text_input("Número da norma")
+        norma_data_publicacao = st.date_input("Data de publicação da norma", value=None)
 
     if st.button("Concluir", key=f"cf_concluir_{row['id']}"):
         def aplicar():
             sb.table("alteracoes").update({
                 "status": "concluida",
-                "norma_id": norma_id,
                 "data_vigencia": str(data_vigencia),
+                "norma_tipo": norma_tipo,
+                "norma_numero": norma_numero.strip() if norma_numero else None,
+                "norma_data_publicacao": str(norma_data_publicacao) if norma_data_publicacao else None,
                 "usuario_conclusao_id": usuario_atual_id(),
                 "concluido_em": datetime.now(timezone.utc).isoformat(),
             }).eq("id", row["id"]).execute()
             if row["tipo_alteracao"] == "cadastral" and row.get("campo"):
+                novo = row["valor_novo"]
+                valor_aplicar = novo.get("id") if isinstance(novo, dict) else novo
                 sb.table("linhas").update(
-                    {row["campo"]: row["valor_novo"]}
+                    {row["campo"]: valor_aplicar}
                 ).eq("codigo", row["linha_codigo"]).execute()
             elif row["tipo_alteracao"] == "exclusao":
                 sb.table("linhas").update({"status": "excluida"}).eq("codigo", row["linha_codigo"]).execute()
 
         if executar(aplicar):
             recarregar()
+
+
+def _fmt_valor_os(v):
+    if isinstance(v, dict):
+        return v.get("label") or "—"
+    return v if v not in (None, "") else "—"
+
+
+@st.dialog("Detalhes da OS")
+def dlg_ver_detalhes_os(row):
+    linhas_df = listar("linhas")
+    usuarios_df = listar("usuarios")
+    linha_atual = linhas_df.loc[linhas_df["codigo"] == row["linha_codigo"]]
+    nome_linha = linha_atual["nome"].iloc[0] if not linha_atual.empty else "—"
+
+    st.markdown(f"**Linha:** {row['linha_codigo']} — {nome_linha}")
+    st.markdown(f"**Tipo de OS:** {TIPO_ALTERACAO_LABEL.get(row['tipo_alteracao'], row['tipo_alteracao'])}")
+    st.markdown(f"**Status:** {STATUS_LABEL.get(row['status'], row['status'])}")
+    if row.get("campo"):
+        campo_labels = [k for k, v in CAMPOS_CADASTRAIS.items() if v == row["campo"]]
+        st.markdown(f"**Campo alterado:** {campo_labels[0] if campo_labels else row['campo']}")
+    st.markdown(f"**Valor anterior:** {_fmt_valor_os(row.get('valor_anterior'))}")
+    st.markdown(f"**Valor novo:** {_fmt_valor_os(row.get('valor_novo'))}")
+    st.markdown(f"**Observação:** {row.get('observacao') or '—'}")
+    st.markdown(f"**Criado por:** {_nome_por_id(usuarios_df, row.get('usuario_criador_id'))}")
+    if pd.notna(row.get("criado_em")):
+        st.markdown(f"**Criado em:** {pd.to_datetime(row['criado_em']).strftime('%d/%m/%Y %H:%M')}")
+
+    if row["status"] == "concluida":
+        st.divider()
+        st.markdown(f"**Data de vigência:** {row.get('data_vigencia') or '—'}")
+        if row.get("norma_tipo") or row.get("norma_numero"):
+            st.markdown(f"**Norma:** {row.get('norma_tipo') or ''} nº {row.get('norma_numero') or '—'}")
+            if row.get("norma_data_publicacao"):
+                st.markdown(f"**Publicada em:** {row['norma_data_publicacao']}")
+        else:
+            st.markdown("**Norma:** não informada")
+        st.markdown(f"**Concluído por:** {_nome_por_id(usuarios_df, row.get('usuario_conclusao_id'))}")
+        if pd.notna(row.get("concluido_em")):
+            st.markdown(f"**Concluído em:** {pd.to_datetime(row['concluido_em']).strftime('%d/%m/%Y %H:%M')}")
+
+    if st.button("Fechar", key=f"fechar_detalhes_{row['id']}"):
+        st.rerun()
 
 
 # ============================================================================
@@ -570,7 +573,7 @@ with tab_cadastro:
     secao = st.radio(
         "Seção do cadastro",
         ["Sistemas", "Lotes", "Operadores", "Tipos de Linha", "Espécies de Serviço",
-         "Normas", "Linhas"],
+         "Linhas"],
         horizontal=True,
         key="cadastro_secao",
         label_visibility="collapsed",
@@ -636,32 +639,6 @@ with tab_cadastro:
                 st.caption("Selecione uma linha da tabela para editar ou excluir.")
         else:
             st.caption("Apenas administradores podem incluir, editar ou excluir.")
-
-    elif secao == "Normas":
-        st.subheader("Normas")
-        normas_df = listar("normas")
-        if normas_df.empty:
-            st.caption("Nada cadastrado ainda.")
-            pos = None
-        else:
-            exibicao = normas_df[["tipo", "numero", "data_publicacao", "descricao"]].rename(
-                columns={"tipo": "Tipo", "numero": "Número",
-                         "data_publicacao": "Data", "descricao": "Descrição"}
-            )
-            pos = selecionar_linha_df(exibicao, "df_normas")
-
-        c1, c2, c3 = st.columns([1, 1, 1])
-        if c1.button("+ Adicionar", key="abrir_add_norma"):
-            dlg_add_norma()
-        if c2.button("✏️ Editar", key="abrir_ed_norma", disabled=pos is None):
-            dlg_edit_norma(normas_df.iloc[pos])
-        if admin:
-            if c3.button("❌ Excluir", key="abrir_del_norma", disabled=pos is None):
-                dlg_del_norma(normas_df.iloc[pos])
-        else:
-            c3.caption("Exclusão: só administradores.")
-        if pos is None and not normas_df.empty:
-            st.caption("Selecione uma linha da tabela para editar ou excluir.")
 
     elif secao == "Linhas":
         st.subheader("Linhas")
@@ -776,8 +753,9 @@ with tab_os:
 
         if pos_alt is not None:
             sel = filtradas_alt.iloc[pos_alt]
-            st.markdown(f"**Observação:** {sel.get('observacao') or '—'}")
-            c1, c2, c3 = st.columns(3)
+            c0, c1, c2, c3 = st.columns(4)
+            if c0.button("🔍 Ver detalhes", key=f"detalhes_{sel['id']}"):
+                dlg_ver_detalhes_os(sel)
 
             if sel["status"] == "rascunho":
                 if c1.button("Enviar para aprovação", key=f"enviar_{sel['id']}"):
