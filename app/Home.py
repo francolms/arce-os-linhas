@@ -10,7 +10,12 @@ user = require_login()
 sb = get_supabase()
 admin = is_admin()
 
-st.title("Controle de OS de Linhas — ARCE")
+col_titulo, col_atualizar = st.columns([6, 1])
+col_titulo.title("Controle de OS de Linhas — ARCE")
+with col_atualizar:
+    st.write("")
+    if st.button("🔄 Atualizar dados"):
+        st.rerun()
 
 FK_MSG = (
     "Não é possível concluir: este item está vinculado a outro cadastro "
