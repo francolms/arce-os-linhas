@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pandas as pd
 import streamlit as st
 from auth import is_admin, require_login
@@ -58,16 +60,25 @@ def _index_atual(df: pd.DataFrame, id_valor) -> int:
     return int(achado[0]) if len(achado) else 0
 
 
-def executar(fn, msg_erro: str | None = None) -> bool:
+def executar(fn, msg_erro: str | None = None, msg_duplicado: str | None = None) -> bool:
     try:
         fn()
         return True
     except APIError as e:
-        if getattr(e, "code", None) == "23503":
+        codigo_erro = getattr(e, "code", None)
+        if codigo_erro == "23503":
             st.error(msg_erro or FK_MSG)
+        elif codigo_erro == "23505":
+            st.error(msg_duplicado or "Já existe um registro com esses dados.")
         else:
             st.error(f"Erro ao salvar: {getattr(e, 'message', e)}")
         return False
+
+
+def usuario_atual_id() -> int:
+    usuarios_df = listar("usuarios")
+    achado = usuarios_df.loc[usuarios_df["email"] == user.email, "id"]
+    return int(achado.iloc[0])
 
 
 def selecionar_linha_df(df_exibicao: pd.DataFrame, key: str):
@@ -379,15 +390,186 @@ def dlg_del_linha(row):
 
 
 # ============================================================================
+# Alterações (fluxo de aprovação)
+# ============================================================================
+
+STATUS_LABEL = {
+    "rascunho": "Rascunho",
+    "enviada_aprovacao": "Enviada para aprovação",
+    "aprovada_aguardando_norma": "Aprovada (aguardando norma)",
+    "concluida": "Concluída",
+    "cancelada": "Cancelada",
+}
+TIPO_ALTERACAO_LABEL = {
+    "inclusao": "Inclusão de linha",
+    "exclusao": "Exclusão de linha",
+    "cadastral": "Alteração cadastral",
+    "tarifa": "Tarifa",
+    "frequencia": "Frequência",
+    "horario": "Horário",
+    "itinerario": "Itinerário",
+    "seccionamento": "Seccionamento",
+}
+CAMPOS_CADASTRAIS = {
+    "Nome": "nome",
+    "Tipo de Linha": "tipo_linha_id",
+    "Espécie de Serviço": "especie_servico_id",
+    "Sistema": "sistema_id",
+    "Lote": "lote_id",
+    "Operador": "operador_id",
+}
+
+
+def _linha_tem_alteracao_aberta(linha_codigo: str) -> bool:
+    alteracoes_df = listar("alteracoes")
+    if alteracoes_df.empty:
+        return False
+    abertas = alteracoes_df[
+        (alteracoes_df["linha_codigo"] == linha_codigo)
+        & (~alteracoes_df["status"].isin(["concluida", "cancelada"]))
+    ]
+    return not abertas.empty
+
+
+@st.dialog("Nova Alteração")
+def dlg_nova_alteracao():
+    linhas_df = listar("linhas", order="codigo")
+    if linhas_df.empty:
+        st.warning("Nenhuma linha cadastrada.")
+        return
+
+    opcoes_linha = (linhas_df["codigo"] + " — " + linhas_df["nome"]).tolist()
+    escolha_linha = st.selectbox("Linha", opcoes_linha)
+    codigo_linha = escolha_linha.split(" — ")[0]
+    linha_row = linhas_df.loc[linhas_df["codigo"] == codigo_linha].iloc[0]
+
+    if _linha_tem_alteracao_aberta(codigo_linha):
+        st.error(
+            "Essa linha já tem uma alteração em andamento (não concluída/cancelada). "
+            "Finalize ou cancele a anterior antes de abrir uma nova."
+        )
+        return
+
+    tipo_label = st.selectbox("Tipo de alteração", list(TIPO_ALTERACAO_LABEL.values()))
+    tipo_db = [k for k, v in TIPO_ALTERACAO_LABEL.items() if v == tipo_label][0]
+
+    campo_db = None
+    valor_anterior = None
+    valor_novo = None
+
+    if tipo_db == "cadastral":
+        sistemas_df = listar("sistemas")
+        lotes_df = listar("lotes")
+        operadores_df = listar("operadores", order="nome")
+        tipos_df = listar("tipos_linha", order="nome")
+        especies_df = listar("especies_servico", order="nome")
+
+        campo_label = st.selectbox("Campo a alterar", list(CAMPOS_CADASTRAIS.keys()))
+        campo_db = CAMPOS_CADASTRAIS[campo_label]
+
+        if campo_db == "nome":
+            valor_anterior = linha_row["nome"]
+            st.caption(f"Valor atual: {valor_anterior}")
+            novo_texto = st.text_input("Novo nome")
+            valor_novo = novo_texto.strip()
+        else:
+            opcoes_df = {
+                "tipo_linha_id": tipos_df, "especie_servico_id": especies_df,
+                "sistema_id": sistemas_df, "lote_id": lotes_df, "operador_id": operadores_df,
+            }[campo_db]
+            valor_anterior = _nome_por_id(opcoes_df, linha_row.get(campo_db))
+            st.caption(f"Valor atual: {valor_anterior}")
+            escolha = st.selectbox("Novo valor", opcoes_df["nome"] if not opcoes_df.empty else [])
+            valor_novo = _id_por_nome(opcoes_df, escolha)
+    else:
+        valor_anterior = st.text_input("Valor/situação anterior (opcional)")
+        valor_novo = st.text_area("O que está mudando")
+
+    observacao = st.text_area("Observação (opcional)")
+
+    if st.button("Criar alteração", key="cf_nova_alteracao"):
+        if tipo_db == "cadastral" and (valor_novo is None or valor_novo == ""):
+            st.warning("Informe o novo valor.")
+            return
+        if tipo_db != "cadastral" and not str(valor_novo).strip():
+            st.warning("Descreva o que está mudando.")
+            return
+        dados = {
+            "linha_codigo": codigo_linha,
+            "tipo_alteracao": tipo_db,
+            "campo": campo_db,
+            "valor_anterior": valor_anterior,
+            "valor_novo": valor_novo,
+            "status": "rascunho",
+            "usuario_criador_id": usuario_atual_id(),
+            "observacao": observacao.strip() or None,
+        }
+        if executar(
+            lambda: sb.table("alteracoes").insert(dados).execute(),
+            msg_duplicado="Essa linha já tem uma alteração em andamento.",
+        ):
+            recarregar()
+
+
+@st.dialog("Cancelar Alteração")
+def dlg_cancelar_alteracao(row):
+    st.warning(f"Cancelar a alteração da linha **{row['linha_codigo']}**?")
+    motivo = st.text_area("Motivo (opcional)")
+    c1, c2 = st.columns(2)
+    if c1.button("Confirmar cancelamento", key=f"cf_cancel_{row['id']}"):
+        nova_obs = (row.get("observacao") or "")
+        if motivo.strip():
+            nova_obs = (nova_obs + " | Cancelada: " + motivo.strip()).strip(" |")
+        if executar(lambda: sb.table("alteracoes").update(
+            {"status": "cancelada", "observacao": nova_obs or None}
+        ).eq("id", row["id"]).execute()):
+            recarregar()
+    if c2.button("Voltar", key=f"cc_cancel_{row['id']}"):
+        st.rerun()
+
+
+@st.dialog("Concluir Alteração")
+def dlg_concluir_alteracao(row):
+    st.write(f"Linha **{row['linha_codigo']}** — {TIPO_ALTERACAO_LABEL.get(row['tipo_alteracao'], row['tipo_alteracao'])}")
+    normas_df = listar("normas")
+    if normas_df.empty:
+        st.warning("Cadastre a norma antes (aba Normas).")
+        return
+    rotulos_norma = normas_df.apply(lambda r: f"{r['tipo']} nº {r['numero']}", axis=1)
+    escolha_norma = st.selectbox("Norma que validou a alteração", rotulos_norma)
+    norma_id = int(normas_df.loc[rotulos_norma == escolha_norma, "id"].iloc[0])
+    data_vigencia = st.date_input("Data de vigência")
+
+    if st.button("Concluir", key=f"cf_concluir_{row['id']}"):
+        def aplicar():
+            sb.table("alteracoes").update({
+                "status": "concluida",
+                "norma_id": norma_id,
+                "data_vigencia": str(data_vigencia),
+                "usuario_conclusao_id": usuario_atual_id(),
+                "concluido_em": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", row["id"]).execute()
+            if row["tipo_alteracao"] == "cadastral" and row.get("campo"):
+                sb.table("linhas").update(
+                    {row["campo"]: row["valor_novo"]}
+                ).eq("codigo", row["linha_codigo"]).execute()
+            elif row["tipo_alteracao"] == "exclusao":
+                sb.table("linhas").update({"status": "excluida"}).eq("codigo", row["linha_codigo"]).execute()
+
+        if executar(aplicar):
+            recarregar()
+
+
+# ============================================================================
 # Abas
 # ============================================================================
 
 (
     tab_sistemas, tab_lotes, tab_operadores, tab_tipos, tab_especies,
-    tab_normas, tab_linhas,
+    tab_normas, tab_linhas, tab_alteracoes,
 ) = st.tabs(
     ["Sistemas", "Lotes", "Operadores", "Tipos de Linha", "Espécies de Serviço",
-     "Normas", "Linhas"]
+     "Normas", "Linhas", "Alterações"]
 )
 
 with tab_sistemas:
@@ -541,3 +723,79 @@ with tab_linhas:
         c3.caption("Exclusão: só administradores.")
     if pos is None and not linhas_df.empty:
         st.caption("Selecione uma linha da tabela para editar ou excluir.")
+
+with tab_alteracoes:
+    st.subheader("Alterações")
+
+    if st.button("+ Nova Alteração", key="abrir_add_alteracao"):
+        dlg_nova_alteracao()
+
+    alteracoes_df = listar("alteracoes")
+    if alteracoes_df.empty:
+        st.caption("Nenhuma alteração registrada ainda.")
+    else:
+        usuarios_df = listar("usuarios")
+        opcoes_status = ["(Todas em aberto)", "(Todas)"] + list(STATUS_LABEL.values())
+        status_filtro = st.selectbox("Status", opcoes_status, key="alt_f_status")
+
+        alteracoes_df = alteracoes_df.copy()
+        alteracoes_df["criado_em_dt"] = pd.to_datetime(alteracoes_df["criado_em"])
+        alteracoes_df["dias"] = (
+            pd.Timestamp.now(tz=alteracoes_df["criado_em_dt"].dt.tz) - alteracoes_df["criado_em_dt"]
+        ).dt.days
+
+        filtradas_alt = alteracoes_df
+        if status_filtro == "(Todas em aberto)":
+            filtradas_alt = filtradas_alt[~filtradas_alt["status"].isin(["concluida", "cancelada"])]
+        elif status_filtro != "(Todas)":
+            status_db = [k for k, v in STATUS_LABEL.items() if v == status_filtro][0]
+            filtradas_alt = filtradas_alt[filtradas_alt["status"] == status_db]
+        filtradas_alt = filtradas_alt.sort_values("criado_em", ascending=False).reset_index(drop=True)
+
+        if filtradas_alt.empty:
+            st.caption("Nenhuma alteração nesse filtro.")
+            pos_alt = None
+        else:
+            exibicao = filtradas_alt.copy()
+            exibicao["Tipo"] = exibicao["tipo_alteracao"].map(lambda t: TIPO_ALTERACAO_LABEL.get(t, t))
+            exibicao["Status"] = exibicao["status"].map(lambda s: STATUS_LABEL.get(s, s))
+            exibicao["Criado por"] = exibicao["usuario_criador_id"].map(lambda i: _nome_por_id(usuarios_df, i))
+            exibicao = exibicao[["linha_codigo", "Tipo", "Status", "dias", "Criado por"]].rename(
+                columns={"linha_codigo": "Linha", "dias": "Dias em aberto"}
+            )
+            st.caption(f"{len(filtradas_alt)} alteração(ões)")
+            pos_alt = selecionar_linha_df(exibicao, "df_alteracoes")
+
+        if pos_alt is not None:
+            sel = filtradas_alt.iloc[pos_alt]
+            st.markdown(f"**Observação:** {sel.get('observacao') or '—'}")
+            c1, c2, c3 = st.columns(3)
+
+            if sel["status"] == "rascunho":
+                if c1.button("Enviar para aprovação", key=f"enviar_{sel['id']}"):
+                    if executar(lambda: sb.table("alteracoes").update(
+                        {"status": "enviada_aprovacao"}
+                    ).eq("id", sel["id"]).execute()):
+                        recarregar()
+                if c3.button("Cancelar alteração", key=f"abrir_cancel_{sel['id']}"):
+                    dlg_cancelar_alteracao(sel)
+
+            elif sel["status"] == "enviada_aprovacao":
+                if c1.button("Marcar como aprovada (aguardando norma)", key=f"aprovar_{sel['id']}"):
+                    if executar(lambda: sb.table("alteracoes").update(
+                        {"status": "aprovada_aguardando_norma"}
+                    ).eq("id", sel["id"]).execute()):
+                        recarregar()
+                if c3.button("Cancelar alteração", key=f"abrir_cancel_{sel['id']}"):
+                    dlg_cancelar_alteracao(sel)
+
+            elif sel["status"] == "aprovada_aguardando_norma":
+                if c1.button("Concluir (norma publicada)", key=f"abrir_concluir_{sel['id']}"):
+                    dlg_concluir_alteracao(sel)
+                if c3.button("Cancelar alteração", key=f"abrir_cancel_{sel['id']}"):
+                    dlg_cancelar_alteracao(sel)
+
+            else:
+                st.caption("Alteração finalizada — sem mais ações disponíveis.")
+        elif not filtradas_alt.empty:
+            st.caption("Selecione uma alteração da tabela para agir sobre ela.")
