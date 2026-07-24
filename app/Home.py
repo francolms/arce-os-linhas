@@ -714,8 +714,11 @@ with tab_linhas:
             dlg_add_linha()
     else:
         c1.caption("Inclusão: só administradores.")
-    if c2.button("✏️ Editar", key="abrir_ed_linha", disabled=pos is None):
-        dlg_edit_linha(filtradas.iloc[pos])
+    if admin:
+        if c2.button("✏️ Editar (direto)", key="abrir_ed_linha", disabled=pos is None):
+            dlg_edit_linha(filtradas.iloc[pos])
+    else:
+        c2.caption("Edição direta: só administradores. Use a aba Alterações.")
     if admin:
         if c3.button("❌ Excluir", key="abrir_del_linha", disabled=pos is None):
             dlg_del_linha(filtradas.iloc[pos])
