@@ -15,6 +15,7 @@ col_titulo.title("Controle de OS de Linhas — ARCE")
 with col_atualizar:
     st.write("")
     if st.button("🔄 Atualizar dados"):
+        st.cache_data.clear()
         st.rerun()
 
 FK_MSG = (
@@ -23,9 +24,17 @@ FK_MSG = (
 )
 
 
+# Consultas em cache: o banco só é consultado de novo após uma gravação
+# (recarregar() limpa o cache) ou pelo botão "Atualizar dados".
+@st.cache_data(ttl=300, show_spinner=False)
 def listar(tabela: str, order: str = "id") -> pd.DataFrame:
-    res = sb.table(tabela).select("*").order(order).execute()
+    res = get_supabase().table(tabela).select("*").order(order).execute()
     return pd.DataFrame(res.data)
+
+
+def recarregar():
+    st.cache_data.clear()
+    st.rerun()
 
 
 def _id_por_nome(df: pd.DataFrame, nome_escolhido):
@@ -61,6 +70,20 @@ def executar(fn, msg_erro: str | None = None) -> bool:
         return False
 
 
+def selecionar_linha_df(df_exibicao: pd.DataFrame, key: str):
+    """Tabela com seleção de 1 linha; devolve a posição selecionada ou None."""
+    evento = st.dataframe(
+        df_exibicao,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=key,
+    )
+    linhas_sel = evento.selection.rows
+    return linhas_sel[0] if linhas_sel else None
+
+
 # ============================================================================
 # Tabelas simples (só "nome"): Sistemas, Tipos de Linha, Espécies de Serviço
 # ============================================================================
@@ -72,7 +95,7 @@ def dlg_add_simples(tabela: str):
         if not nome.strip():
             st.warning("Informe um nome.")
         elif executar(lambda: sb.table(tabela).insert({"nome": nome.strip()}).execute()):
-            st.rerun()
+            recarregar()
 
 
 @st.dialog("Editar")
@@ -81,7 +104,7 @@ def dlg_edit_simples(tabela: str, row):
     c1, c2 = st.columns(2)
     if c1.button("Salvar", key=f"cf_edit_{tabela}_{row['id']}"):
         if executar(lambda: sb.table(tabela).update({"nome": nome.strip()}).eq("id", row["id"]).execute()):
-            st.rerun()
+            recarregar()
     if c2.button("Cancelar", key=f"cc_edit_{tabela}_{row['id']}"):
         st.rerun()
 
@@ -92,33 +115,32 @@ def dlg_del_simples(tabela: str, row):
     c1, c2 = st.columns(2)
     if c1.button("Confirmar exclusão", key=f"cf_del_{tabela}_{row['id']}"):
         if executar(lambda: sb.table(tabela).delete().eq("id", row["id"]).execute()):
-            st.rerun()
+            recarregar()
     if c2.button("Cancelar", key=f"cc_del_{tabela}_{row['id']}"):
         st.rerun()
 
 
 def tabela_simples(tabela: str, titulo: str):
     st.subheader(titulo)
-    if admin and st.button("+ Adicionar", key=f"abrir_add_{tabela}"):
-        dlg_add_simples(tabela)
-
     df = listar(tabela, order="nome")
+
     if df.empty:
         st.caption("Nada cadastrado ainda.")
+        pos = None
     else:
-        larguras = [6, 1, 1] if admin else [8]
-        cab = st.columns(larguras)
-        cab[0].markdown("**Nome**")
-        for _, row in df.iterrows():
-            cols = st.columns(larguras)
-            cols[0].write(row["nome"])
-            if admin:
-                if cols[1].button("✏️", key=f"ed_{tabela}_{row['id']}"):
-                    dlg_edit_simples(tabela, row)
-                if cols[2].button("❌", key=f"del_{tabela}_{row['id']}"):
-                    dlg_del_simples(tabela, row)
+        pos = selecionar_linha_df(df[["nome"]].rename(columns={"nome": "Nome"}), f"df_{tabela}")
 
-    if not admin:
+    if admin:
+        c1, c2, c3 = st.columns([1, 1, 1])
+        if c1.button("+ Adicionar", key=f"abrir_add_{tabela}"):
+            dlg_add_simples(tabela)
+        if c2.button("✏️ Editar", key=f"abrir_ed_{tabela}", disabled=pos is None):
+            dlg_edit_simples(tabela, df.iloc[pos])
+        if c3.button("❌ Excluir", key=f"abrir_del_{tabela}", disabled=pos is None):
+            dlg_del_simples(tabela, df.iloc[pos])
+        if pos is None and not df.empty:
+            st.caption("Selecione uma linha da tabela para editar ou excluir.")
+    else:
         st.caption("Apenas administradores podem incluir, editar ou excluir.")
 
 
@@ -136,7 +158,7 @@ def dlg_add_operador():
         elif executar(lambda: sb.table("operadores").insert(
             {"nome": nome.strip(), "cnpj": cnpj.strip() or None}
         ).execute()):
-            st.rerun()
+            recarregar()
 
 
 @st.dialog("Editar Operador")
@@ -149,7 +171,7 @@ def dlg_edit_operador(row):
         if executar(lambda: sb.table("operadores").update(
             {"nome": nome.strip(), "cnpj": cnpj.strip() or None}
         ).eq("id", row["id"]).execute()):
-            st.rerun()
+            recarregar()
     if c2.button("Cancelar", key=f"cc_edit_operador_{row['id']}"):
         st.rerun()
 
@@ -160,7 +182,7 @@ def dlg_del_operador(row):
     c1, c2 = st.columns(2)
     if c1.button("Confirmar exclusão", key=f"cf_del_operador_{row['id']}"):
         if executar(lambda: sb.table("operadores").delete().eq("id", row["id"]).execute()):
-            st.rerun()
+            recarregar()
     if c2.button("Cancelar", key=f"cc_del_operador_{row['id']}"):
         st.rerun()
 
@@ -183,7 +205,7 @@ def dlg_add_lote():
         elif executar(lambda: sb.table("lotes").insert(
             {"sistema_id": _id_por_nome(sistemas_df, sistema), "nome": nome.strip()}
         ).execute()):
-            st.rerun()
+            recarregar()
 
 
 @st.dialog("Editar Lote")
@@ -199,7 +221,7 @@ def dlg_edit_lote(row):
         if executar(lambda: sb.table("lotes").update(
             {"sistema_id": _id_por_nome(sistemas_df, sistema), "nome": nome.strip()}
         ).eq("id", row["id"]).execute()):
-            st.rerun()
+            recarregar()
     if c2.button("Cancelar", key=f"cc_edit_lote_{row['id']}"):
         st.rerun()
 
@@ -210,7 +232,7 @@ def dlg_del_lote(row):
     c1, c2 = st.columns(2)
     if c1.button("Confirmar exclusão", key=f"cf_del_lote_{row['id']}"):
         if executar(lambda: sb.table("lotes").delete().eq("id", row["id"]).execute()):
-            st.rerun()
+            recarregar()
     if c2.button("Cancelar", key=f"cc_del_lote_{row['id']}"):
         st.rerun()
 
@@ -237,7 +259,7 @@ def dlg_add_norma():
             "data_publicacao": str(data_publicacao) if data_publicacao else None,
             "descricao": descricao.strip() or None,
         }).execute()):
-            st.rerun()
+            recarregar()
 
 
 @st.dialog("Editar Norma")
@@ -256,7 +278,7 @@ def dlg_edit_norma(row):
             "data_publicacao": str(data_publicacao) if data_publicacao else None,
             "descricao": descricao.strip() or None,
         }).eq("id", row["id"]).execute()):
-            st.rerun()
+            recarregar()
     if c2.button("Cancelar", key=f"cc_edit_norma_{row['id']}"):
         st.rerun()
 
@@ -267,7 +289,7 @@ def dlg_del_norma(row):
     c1, c2 = st.columns(2)
     if c1.button("Confirmar exclusão", key=f"cf_del_norma_{row['id']}"):
         if executar(lambda: sb.table("normas").delete().eq("id", row["id"]).execute()):
-            st.rerun()
+            recarregar()
     if c2.button("Cancelar", key=f"cc_del_norma_{row['id']}"):
         st.rerun()
 
@@ -281,7 +303,7 @@ def _campos_linha(valores=None):
     valores = valores or {}
     sistemas_df = listar("sistemas")
     lotes_df = listar("lotes")
-    operadores_df = listar("operadores")
+    operadores_df = listar("operadores", order="nome")
     tipos_df = listar("tipos_linha", order="nome")
     especies_df = listar("especies_servico", order="nome")
 
@@ -300,7 +322,8 @@ def _campos_linha(valores=None):
     )
     sistema_id = _id_por_nome(sistemas_df, sistema)
     lotes_do_sistema = (
-        lotes_df[lotes_df["sistema_id"] == sistema_id] if sistema_id and not lotes_df.empty else pd.DataFrame()
+        lotes_df[lotes_df["sistema_id"] == sistema_id].reset_index(drop=True)
+        if sistema_id and not lotes_df.empty else pd.DataFrame()
     )
     lote = st.selectbox(
         "Lote", lotes_do_sistema["nome"] if not lotes_do_sistema.empty else [],
@@ -329,7 +352,7 @@ def dlg_add_linha():
         if not codigo.strip() or not dados["nome"]:
             st.warning("Informe ao menos código e nome.")
         elif executar(lambda: sb.table("linhas").insert({"codigo": codigo.strip(), **dados}).execute()):
-            st.rerun()
+            recarregar()
 
 
 @st.dialog("Editar Linha")
@@ -339,7 +362,7 @@ def dlg_edit_linha(row):
     c1, c2 = st.columns(2)
     if c1.button("Salvar", key=f"cf_edit_linha_{row['codigo']}"):
         if executar(lambda: sb.table("linhas").update(dados).eq("codigo", row["codigo"]).execute()):
-            st.rerun()
+            recarregar()
     if c2.button("Cancelar", key=f"cc_edit_linha_{row['codigo']}"):
         st.rerun()
 
@@ -350,7 +373,7 @@ def dlg_del_linha(row):
     c1, c2 = st.columns(2)
     if c1.button("Confirmar exclusão", key=f"cf_del_linha_{row['codigo']}"):
         if executar(lambda: sb.table("linhas").delete().eq("codigo", row["codigo"]).execute()):
-            st.rerun()
+            recarregar()
     if c2.button("Cancelar", key=f"cc_del_linha_{row['codigo']}"):
         st.rerun()
 
@@ -378,111 +401,143 @@ with tab_especies:
 
 with tab_operadores:
     st.subheader("Operadores")
-    if admin and st.button("+ Adicionar", key="abrir_add_operador"):
-        dlg_add_operador()
     df = listar("operadores", order="nome")
     if df.empty:
         st.caption("Nada cadastrado ainda.")
+        pos = None
     else:
-        larguras = [4, 3, 1, 1] if admin else [4, 3]
-        cab = st.columns(larguras)
-        cab[0].markdown("**Nome**")
-        cab[1].markdown("**CNPJ**")
-        for _, row in df.iterrows():
-            cols = st.columns(larguras)
-            cols[0].write(row["nome"])
-            cols[1].write(row["cnpj"] if pd.notna(row.get("cnpj")) else "—")
-            if admin:
-                if cols[2].button("✏️", key=f"ed_operador_{row['id']}"):
-                    dlg_edit_operador(row)
-                if cols[3].button("❌", key=f"del_operador_{row['id']}"):
-                    dlg_del_operador(row)
-    if not admin:
+        exibicao = df[["nome", "cnpj"]].rename(columns={"nome": "Nome", "cnpj": "CNPJ"})
+        pos = selecionar_linha_df(exibicao, "df_operadores")
+
+    if admin:
+        c1, c2, c3 = st.columns([1, 1, 1])
+        if c1.button("+ Adicionar", key="abrir_add_operador"):
+            dlg_add_operador()
+        if c2.button("✏️ Editar", key="abrir_ed_operador", disabled=pos is None):
+            dlg_edit_operador(df.iloc[pos])
+        if c3.button("❌ Excluir", key="abrir_del_operador", disabled=pos is None):
+            dlg_del_operador(df.iloc[pos])
+        if pos is None and not df.empty:
+            st.caption("Selecione uma linha da tabela para editar ou excluir.")
+    else:
         st.caption("Apenas administradores podem incluir, editar ou excluir.")
 
 with tab_lotes:
     st.subheader("Lotes")
-    if admin and st.button("+ Adicionar", key="abrir_add_lote"):
-        dlg_add_lote()
     sistemas_df = listar("sistemas")
     lotes_df = listar("lotes")
     if lotes_df.empty:
         st.caption("Nada cadastrado ainda.")
+        pos = None
     else:
-        larguras = [4, 4, 1, 1] if admin else [4, 4]
-        cab = st.columns(larguras)
-        cab[0].markdown("**Nome**")
-        cab[1].markdown("**Sistema**")
-        for _, row in lotes_df.iterrows():
-            cols = st.columns(larguras)
-            cols[0].write(row["nome"])
-            cols[1].write(_nome_por_id(sistemas_df, row.get("sistema_id")))
-            if admin:
-                if cols[2].button("✏️", key=f"ed_lote_{row['id']}"):
-                    dlg_edit_lote(row)
-                if cols[3].button("❌", key=f"del_lote_{row['id']}"):
-                    dlg_del_lote(row)
-    if not admin:
+        exibicao = lotes_df.copy()
+        exibicao["Sistema"] = exibicao["sistema_id"].map(
+            lambda i: _nome_por_id(sistemas_df, i)
+        )
+        exibicao = exibicao[["nome", "Sistema"]].rename(columns={"nome": "Nome"})
+        pos = selecionar_linha_df(exibicao, "df_lotes")
+
+    if admin:
+        c1, c2, c3 = st.columns([1, 1, 1])
+        if c1.button("+ Adicionar", key="abrir_add_lote"):
+            dlg_add_lote()
+        if c2.button("✏️ Editar", key="abrir_ed_lote", disabled=pos is None):
+            dlg_edit_lote(lotes_df.iloc[pos])
+        if c3.button("❌ Excluir", key="abrir_del_lote", disabled=pos is None):
+            dlg_del_lote(lotes_df.iloc[pos])
+        if pos is None and not lotes_df.empty:
+            st.caption("Selecione uma linha da tabela para editar ou excluir.")
+    else:
         st.caption("Apenas administradores podem incluir, editar ou excluir.")
 
 with tab_normas:
     st.subheader("Normas")
-    if st.button("+ Adicionar", key="abrir_add_norma"):
-        dlg_add_norma()
     normas_df = listar("normas")
     if normas_df.empty:
         st.caption("Nada cadastrado ainda.")
+        pos = None
     else:
-        larguras = [1, 2, 2, 3, 1, 1] if admin else [1, 2, 2, 3, 1]
-        titulos = ["Tipo", "Número", "Data", "Descrição", "Editar"] + (["Excluir"] if admin else [])
-        cab = st.columns(larguras)
-        for c, t in zip(cab, titulos):
-            c.markdown(f"**{t}**")
-        for _, row in normas_df.iterrows():
-            cols = st.columns(larguras)
-            cols[0].write(row["tipo"])
-            cols[1].write(row["numero"])
-            cols[2].write(row["data_publicacao"] if pd.notna(row.get("data_publicacao")) else "—")
-            cols[3].write(row["descricao"] if pd.notna(row.get("descricao")) else "—")
-            if cols[4].button("✏️", key=f"ed_norma_{row['id']}"):
-                dlg_edit_norma(row)
-            if admin:
-                if cols[5].button("❌", key=f"del_norma_{row['id']}"):
-                    dlg_del_norma(row)
+        exibicao = normas_df[["tipo", "numero", "data_publicacao", "descricao"]].rename(
+            columns={"tipo": "Tipo", "numero": "Número",
+                     "data_publicacao": "Data", "descricao": "Descrição"}
+        )
+        pos = selecionar_linha_df(exibicao, "df_normas")
+
+    c1, c2, c3 = st.columns([1, 1, 1])
+    if c1.button("+ Adicionar", key="abrir_add_norma"):
+        dlg_add_norma()
+    if c2.button("✏️ Editar", key="abrir_ed_norma", disabled=pos is None):
+        dlg_edit_norma(normas_df.iloc[pos])
+    if admin:
+        if c3.button("❌ Excluir", key="abrir_del_norma", disabled=pos is None):
+            dlg_del_norma(normas_df.iloc[pos])
+    else:
+        c3.caption("Exclusão: só administradores.")
+    if pos is None and not normas_df.empty:
+        st.caption("Selecione uma linha da tabela para editar ou excluir.")
 
 with tab_linhas:
     st.subheader("Linhas")
-    if admin:
-        if st.button("+ Adicionar", key="abrir_add_linha"):
-            dlg_add_linha()
-    else:
-        st.caption("Inclusão e exclusão de linhas são restritas a administradores.")
 
+    sistemas_df = listar("sistemas")
+    lotes_df = listar("lotes")
+    operadores_df = listar("operadores", order="nome")
+    tipos_df = listar("tipos_linha")
+    especies_df = listar("especies_servico")
     linhas_df = listar("linhas", order="codigo")
+
     if linhas_df.empty:
         st.caption("Nenhuma linha cadastrada ainda.")
+        pos = None
+        filtradas = linhas_df
     else:
-        sistemas_df = listar("sistemas")
-        lotes_df = listar("lotes")
-        operadores_df = listar("operadores")
-        tipos_df = listar("tipos_linha")
-        especies_df = listar("especies_servico")
+        # Filtros para achar a linha sem rolar 650 registros
+        f1, f2, f3 = st.columns([2, 2, 2])
+        busca = f1.text_input("Buscar por código ou nome", key="linhas_busca")
+        sistema_filtro = f2.selectbox(
+            "Sistema", ["(Todos)"] + sistemas_df["nome"].tolist(), key="linhas_f_sistema"
+        )
+        operador_filtro = f3.selectbox(
+            "Operador", ["(Todos)"] + operadores_df["nome"].tolist(), key="linhas_f_operador"
+        )
 
-        larguras = [1, 3, 2, 2, 2, 2, 1, 1] if admin else [1, 3, 2, 2, 2, 2, 1]
-        titulos = ["Código", "Nome", "Tipo", "Espécie", "Sistema", "Operador", "Editar"] + (["Excluir"] if admin else [])
-        cab = st.columns(larguras)
-        for c, t in zip(cab, titulos):
-            c.markdown(f"**{t}**")
-        for _, row in linhas_df.iterrows():
-            cols = st.columns(larguras)
-            cols[0].write(row["codigo"])
-            cols[1].write(row["nome"])
-            cols[2].write(_nome_por_id(tipos_df, row.get("tipo_linha_id")))
-            cols[3].write(_nome_por_id(especies_df, row.get("especie_servico_id")))
-            cols[4].write(_nome_por_id(sistemas_df, row.get("sistema_id")))
-            cols[5].write(_nome_por_id(operadores_df, row.get("operador_id")))
-            if cols[6].button("✏️", key=f"ed_linha_{row['codigo']}"):
-                dlg_edit_linha(row)
-            if admin:
-                if cols[7].button("❌", key=f"del_linha_{row['codigo']}"):
-                    dlg_del_linha(row)
+        filtradas = linhas_df
+        if busca.strip():
+            termo = busca.strip().lower()
+            filtradas = filtradas[
+                filtradas["codigo"].str.lower().str.contains(termo, na=False)
+                | filtradas["nome"].str.lower().str.contains(termo, na=False)
+            ]
+        if sistema_filtro != "(Todos)":
+            filtradas = filtradas[filtradas["sistema_id"] == _id_por_nome(sistemas_df, sistema_filtro)]
+        if operador_filtro != "(Todos)":
+            filtradas = filtradas[filtradas["operador_id"] == _id_por_nome(operadores_df, operador_filtro)]
+        filtradas = filtradas.reset_index(drop=True)
+
+        exibicao = filtradas.copy()
+        exibicao["Tipo"] = exibicao["tipo_linha_id"].map(lambda i: _nome_por_id(tipos_df, i))
+        exibicao["Espécie"] = exibicao["especie_servico_id"].map(lambda i: _nome_por_id(especies_df, i))
+        exibicao["Sistema"] = exibicao["sistema_id"].map(lambda i: _nome_por_id(sistemas_df, i))
+        exibicao["Lote"] = exibicao["lote_id"].map(lambda i: _nome_por_id(lotes_df, i))
+        exibicao["Operador"] = exibicao["operador_id"].map(lambda i: _nome_por_id(operadores_df, i))
+        exibicao = exibicao[["codigo", "nome", "Tipo", "Espécie", "Sistema", "Lote", "Operador"]].rename(
+            columns={"codigo": "Código", "nome": "Nome"}
+        )
+        st.caption(f"{len(filtradas)} de {len(linhas_df)} linhas")
+        pos = selecionar_linha_df(exibicao, "df_linhas")
+
+    c1, c2, c3 = st.columns([1, 1, 1])
+    if admin:
+        if c1.button("+ Adicionar", key="abrir_add_linha"):
+            dlg_add_linha()
+    else:
+        c1.caption("Inclusão: só administradores.")
+    if c2.button("✏️ Editar", key="abrir_ed_linha", disabled=pos is None):
+        dlg_edit_linha(filtradas.iloc[pos])
+    if admin:
+        if c3.button("❌ Excluir", key="abrir_del_linha", disabled=pos is None):
+            dlg_del_linha(filtradas.iloc[pos])
+    else:
+        c3.caption("Exclusão: só administradores.")
+    if pos is None and not linhas_df.empty:
+        st.caption("Selecione uma linha da tabela para editar ou excluir.")
