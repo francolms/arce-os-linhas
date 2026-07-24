@@ -34,6 +34,15 @@ def listar(tabela: str, order: str = "id") -> pd.DataFrame:
     return pd.DataFrame(res.data)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def listar_por_linha(tabela: str, linha_codigo: str, order: str = "id") -> pd.DataFrame:
+    res = (
+        get_supabase().table(tabela).select("*")
+        .eq("linha_codigo", linha_codigo).order(order).execute()
+    )
+    return pd.DataFrame(res.data)
+
+
 def recarregar():
     st.cache_data.clear()
     st.rerun()
@@ -335,6 +344,61 @@ def dlg_del_linha(row):
         st.rerun()
 
 
+@st.dialog("Estrutura da Linha")
+def dlg_ver_estrutura_linha(row):
+    codigo_linha = row["codigo"]
+    st.write(f"**{codigo_linha} — {row['nome']}**")
+
+    secoes_df = listar_por_linha("secoes", codigo_linha, order="ordem")
+    st.subheader("Seções")
+    if secoes_df.empty:
+        st.caption("Nenhuma seção cadastrada ainda (crie uma OS de Seccionamento).")
+    else:
+        exibicao = secoes_df[["ordem", "nome", "tipo_ponto", "km_acumulado"]].rename(
+            columns={"ordem": "Ordem", "nome": "Nome", "tipo_ponto": "Tipo", "km_acumulado": "Km acumulado"}
+        )
+        st.dataframe(exibicao, hide_index=True, use_container_width=True)
+        extensao = _extensao_total(secoes_df)
+        st.caption(f"Extensão total: {extensao} km" if extensao is not None else "Extensão: —")
+
+    st.subheader("Tarifas")
+    tarifas_df = listar_por_linha("tarifas", codigo_linha)
+    if tarifas_df.empty or secoes_df.empty:
+        st.caption("Nenhuma tarifa cadastrada ainda (crie uma OS de Tarifa).")
+    else:
+        mapa_nome = secoes_df.set_index("id")["nome"]
+        tarifas_df = tarifas_df.copy()
+        tarifas_df["Origem"] = tarifas_df["secao_origem_id"].map(mapa_nome)
+        tarifas_df["Destino"] = tarifas_df["secao_destino_id"].map(mapa_nome)
+        pivot = tarifas_df.pivot(index="Origem", columns="Destino", values="valor")
+        ordem_nomes = secoes_df.sort_values("ordem")["nome"].tolist()
+        pivot = pivot.reindex(
+            index=[n for n in ordem_nomes if n in pivot.index],
+            columns=[n for n in ordem_nomes if n in pivot.columns],
+        )
+        st.dataframe(pivot, use_container_width=True)
+
+    st.subheader("Horários")
+    horarios_df = listar_por_linha("horarios", codigo_linha)
+    if horarios_df.empty:
+        st.caption("Nenhum horário cadastrado ainda (crie uma OS de Horário).")
+    else:
+        for sentido, titulo in [("ida", "Ida"), ("volta", "Volta")]:
+            sub = horarios_df[horarios_df["sentido"] == sentido]
+            if sub.empty:
+                continue
+            st.markdown(f"**{titulo}**")
+            exibicao = sub[["horario_saida"] + DIAS_SEMANA].rename(
+                columns={"horario_saida": "Saída", **DIAS_SEMANA_LABEL}
+            ).sort_values("Saída")
+            st.dataframe(exibicao, hide_index=True, use_container_width=True)
+            st.caption(f"Frequência semanal ({titulo}): {_frequencia_semanal(horarios_df, sentido=sentido)} viagens")
+        st.caption(f"**Frequência semanal total: {_frequencia_semanal(horarios_df)} viagens**")
+
+    if st.button("Fechar", key=f"fechar_estrutura_{codigo_linha}"):
+        st.rerun()
+
+
 # ============================================================================
 # Alterações (fluxo de aprovação)
 # ============================================================================
@@ -350,11 +414,10 @@ TIPO_ALTERACAO_LABEL = {
     "inclusao": "Inclusão de linha",
     "exclusao": "Exclusão de linha",
     "cadastral": "Alteração cadastral",
+    "seccionamento": "Seccionamento (pontos/extensão)",
     "tarifa": "Tarifa",
-    "frequencia": "Frequência",
-    "horario": "Horário",
+    "horario": "Horário (e frequência)",
     "itinerario": "Itinerário",
-    "seccionamento": "Seccionamento",
 }
 CAMPOS_CADASTRAIS = {
     "Nome": "nome",
@@ -375,6 +438,32 @@ def _linha_tem_alteracao_aberta(linha_codigo: str) -> bool:
         & (~alteracoes_df["status"].isin(["concluida", "cancelada"]))
     ]
     return not abertas.empty
+
+
+def _extensao_total(secoes_df: pd.DataFrame):
+    if secoes_df.empty:
+        return None
+    ultima = secoes_df.sort_values("ordem").iloc[-1]
+    return ultima.get("km_acumulado")
+
+
+DIAS_SEMANA = ["segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo"]
+DIAS_SEMANA_LABEL = {
+    "segunda": "SEG", "terca": "TER", "quarta": "QUA", "quinta": "QUI",
+    "sexta": "SEX", "sabado": "SAB", "domingo": "DOM",
+}
+
+
+def _frequencia_por_dia(horarios_df: pd.DataFrame, sentido: str | None = None) -> dict:
+    df = horarios_df if sentido is None else horarios_df[horarios_df["sentido"] == sentido]
+    if df.empty:
+        return {dia: 0 for dia in DIAS_SEMANA}
+    return {dia: int(df[dia].sum()) for dia in DIAS_SEMANA}
+
+
+def _frequencia_semanal(horarios_df: pd.DataFrame, sentido: str | None = None) -> int:
+    por_dia = _frequencia_por_dia(horarios_df, sentido)
+    return sum(por_dia.values())
 
 
 @st.dialog("Abrir OS")
@@ -432,6 +521,99 @@ def dlg_nova_alteracao():
             }
             escolha = st.selectbox("Novo valor", opcoes_df["nome"] if not opcoes_df.empty else [])
             valor_novo = {"id": _id_por_nome(opcoes_df, escolha), "label": escolha}
+    elif tipo_db == "seccionamento":
+        atuais = listar_por_linha("secoes", codigo_linha, order="ordem")
+        st.caption(
+            "Pontos da linha, na ordem do itinerário. Extensão = km acumulado do último ponto."
+        )
+        base_editor = (
+            atuais[["nome", "tipo_ponto", "km_acumulado"]].reset_index(drop=True)
+            if not atuais.empty
+            else pd.DataFrame(columns=["nome", "tipo_ponto", "km_acumulado"])
+        )
+        editado = st.data_editor(
+            base_editor,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "nome": st.column_config.TextColumn("Ponto"),
+                "tipo_ponto": st.column_config.SelectboxColumn("Tipo", options=["parada", "passagem"]),
+                "km_acumulado": st.column_config.NumberColumn("Km acumulado", min_value=0.0, step=0.1),
+            },
+            key=f"editor_secoes_{codigo_linha}",
+        )
+        valor_anterior = (
+            atuais[["ordem", "nome", "tipo_ponto", "km_acumulado"]].to_dict("records")
+            if not atuais.empty else []
+        )
+
+    elif tipo_db == "horario":
+        atuais = listar_por_linha("horarios", codigo_linha)
+        st.caption("Uma linha por horário de saída. Marque os dias em que ele roda.")
+        colunas = ["sentido", "horario_saida"] + DIAS_SEMANA
+        if not atuais.empty:
+            base_editor = atuais[colunas].copy().reset_index(drop=True)
+            base_editor["horario_saida"] = pd.to_datetime(
+                base_editor["horario_saida"], format="%H:%M:%S"
+            ).dt.time
+        else:
+            base_editor = pd.DataFrame(columns=colunas)
+        column_config = {
+            "sentido": st.column_config.SelectboxColumn("Sentido", options=["ida", "volta"]),
+            "horario_saida": st.column_config.TimeColumn("Saída", format="HH:mm"),
+        }
+        for dia in DIAS_SEMANA:
+            column_config[dia] = st.column_config.CheckboxColumn(DIAS_SEMANA_LABEL[dia])
+        editado = st.data_editor(
+            base_editor, num_rows="dynamic", use_container_width=True, hide_index=True,
+            column_config=column_config, key=f"editor_horarios_{codigo_linha}",
+        )
+        valor_anterior = atuais[colunas].astype(str).to_dict("records") if not atuais.empty else []
+
+    elif tipo_db == "tarifa":
+        secoes_df = listar_por_linha("secoes", codigo_linha, order="ordem")
+        paradas_df = (
+            secoes_df[secoes_df["tipo_ponto"] == "parada"].reset_index(drop=True)
+            if not secoes_df.empty else secoes_df
+        )
+        if len(paradas_df) < 2:
+            st.warning(
+                "Defina ao menos 2 pontos do tipo 'parada' através de uma OS de "
+                "Seccionamento antes de cadastrar tarifas."
+            )
+            return
+        atuais = listar_por_linha("tarifas", codigo_linha)
+        pares = []
+        for i in range(len(paradas_df)):
+            for j in range(i + 1, len(paradas_df)):
+                origem = paradas_df.iloc[i]
+                destino = paradas_df.iloc[j]
+                existente = (
+                    atuais[
+                        (atuais["secao_origem_id"] == origem["id"])
+                        & (atuais["secao_destino_id"] == destino["id"])
+                    ] if not atuais.empty else pd.DataFrame()
+                )
+                pares.append({
+                    "origem_id": int(origem["id"]), "Origem": origem["nome"],
+                    "destino_id": int(destino["id"]), "Destino": destino["nome"],
+                    "Tarifa": float(existente["valor"].iloc[0]) if not existente.empty else 0.0,
+                })
+        base_editor = pd.DataFrame(pares)
+        st.caption("Tarifa entre cada par de paradas da linha.")
+        editado = st.data_editor(
+            base_editor,
+            disabled=["origem_id", "Origem", "destino_id", "Destino"],
+            use_container_width=True,
+            hide_index=True,
+            key=f"editor_tarifas_{codigo_linha}",
+        )
+        valor_anterior = (
+            atuais[["secao_origem_id", "secao_destino_id", "valor"]].to_dict("records")
+            if not atuais.empty else []
+        )
+
     else:
         valor_anterior = st.text_input("Valor/situação anterior (opcional)")
         valor_novo = st.text_area("O que está mudando")
@@ -439,14 +621,56 @@ def dlg_nova_alteracao():
     observacao = st.text_area("Observação (opcional)")
 
     if st.button("Criar alteração", key="cf_nova_alteracao"):
+        if tipo_db == "seccionamento":
+            validas = editado[editado["nome"].astype(str).str.strip() != ""]
+            if validas.empty:
+                st.warning("Adicione ao menos um ponto.")
+                return
+            valor_novo = [
+                {
+                    "ordem": i,
+                    "nome": str(r.nome).strip(),
+                    "tipo_ponto": r.tipo_ponto or "parada",
+                    "km_acumulado": float(r.km_acumulado) if pd.notna(r.km_acumulado) else None,
+                }
+                for i, r in enumerate(validas.itertuples(), start=1)
+            ]
+        elif tipo_db == "horario":
+            validas = editado.dropna(subset=["sentido", "horario_saida"])
+            if validas.empty:
+                st.warning("Adicione ao menos um horário.")
+                return
+            valor_novo = []
+            for r in validas.itertuples():
+                hs = r.horario_saida
+                registro = {
+                    "sentido": r.sentido,
+                    "horario_saida": hs.strftime("%H:%M:%S") if hasattr(hs, "strftime") else str(hs),
+                }
+                for dia in DIAS_SEMANA:
+                    registro[dia] = bool(getattr(r, dia))
+                valor_novo.append(registro)
+        elif tipo_db == "tarifa":
+            valor_novo = [
+                {
+                    "secao_origem_id": int(r.origem_id),
+                    "secao_destino_id": int(r.destino_id),
+                    "valor": float(r.Tarifa) if pd.notna(r.Tarifa) else 0.0,
+                }
+                for r in editado.itertuples()
+            ]
+
         novo_vazio = (
             (isinstance(valor_novo, dict) and not valor_novo.get("id"))
-            or (not isinstance(valor_novo, dict) and not str(valor_novo or "").strip())
+            or (
+                not isinstance(valor_novo, (dict, list))
+                and not str(valor_novo or "").strip()
+            )
         )
         if tipo_db == "cadastral" and novo_vazio:
             st.warning("Informe o novo valor.")
             return
-        if tipo_db != "cadastral" and not str(valor_novo).strip():
+        if tipo_db not in ("cadastral", "seccionamento", "horario", "tarifa") and not str(valor_novo).strip():
             st.warning("Descreva o que está mudando.")
             return
         dados = {
@@ -515,6 +739,27 @@ def dlg_concluir_alteracao(row):
                 ).eq("codigo", row["linha_codigo"]).execute()
             elif row["tipo_alteracao"] == "exclusao":
                 sb.table("linhas").update({"status": "excluida"}).eq("codigo", row["linha_codigo"]).execute()
+            elif row["tipo_alteracao"] == "seccionamento":
+                sb.table("secoes").delete().eq("linha_codigo", row["linha_codigo"]).execute()
+                registros = row["valor_novo"] or []
+                if registros:
+                    sb.table("secoes").insert(
+                        [{**r, "linha_codigo": row["linha_codigo"]} for r in registros]
+                    ).execute()
+            elif row["tipo_alteracao"] == "horario":
+                sb.table("horarios").delete().eq("linha_codigo", row["linha_codigo"]).execute()
+                registros = row["valor_novo"] or []
+                if registros:
+                    sb.table("horarios").insert(
+                        [{**r, "linha_codigo": row["linha_codigo"]} for r in registros]
+                    ).execute()
+            elif row["tipo_alteracao"] == "tarifa":
+                sb.table("tarifas").delete().eq("linha_codigo", row["linha_codigo"]).execute()
+                registros = row["valor_novo"] or []
+                if registros:
+                    sb.table("tarifas").insert(
+                        [{**r, "linha_codigo": row["linha_codigo"]} for r in registros]
+                    ).execute()
 
         if executar(aplicar):
             recarregar()
@@ -539,8 +784,17 @@ def dlg_ver_detalhes_os(row):
     if row.get("campo"):
         campo_labels = [k for k, v in CAMPOS_CADASTRAIS.items() if v == row["campo"]]
         st.markdown(f"**Campo alterado:** {campo_labels[0] if campo_labels else row['campo']}")
-    st.markdown(f"**Valor anterior:** {_fmt_valor_os(row.get('valor_anterior'))}")
-    st.markdown(f"**Valor novo:** {_fmt_valor_os(row.get('valor_novo'))}")
+
+    if row["tipo_alteracao"] in ("seccionamento", "horario", "tarifa"):
+        st.markdown("**Valor anterior:**")
+        anterior = row.get("valor_anterior")
+        st.dataframe(pd.DataFrame(anterior), hide_index=True, use_container_width=True) if anterior else st.caption("—")
+        st.markdown("**Valor novo:**")
+        novo = row.get("valor_novo")
+        st.dataframe(pd.DataFrame(novo), hide_index=True, use_container_width=True) if novo else st.caption("—")
+    else:
+        st.markdown(f"**Valor anterior:** {_fmt_valor_os(row.get('valor_anterior'))}")
+        st.markdown(f"**Valor novo:** {_fmt_valor_os(row.get('valor_novo'))}")
     st.markdown(f"**Observação:** {row.get('observacao') or '—'}")
     st.markdown(f"**Criado por:** {_nome_por_id(usuarios_df, row.get('usuario_criador_id'))}")
     if pd.notna(row.get("criado_em")):
@@ -690,7 +944,9 @@ with tab_cadastro:
             st.caption(f"{len(filtradas)} de {len(linhas_df)} linhas")
             pos = selecionar_linha_df(exibicao, "df_linhas")
 
-        c1, c2, c3 = st.columns([1, 1, 1])
+        c0, c1, c2, c3 = st.columns([1, 1, 1, 1])
+        if c0.button("📊 Estrutura", key="abrir_estrutura_linha", disabled=pos is None):
+            dlg_ver_estrutura_linha(filtradas.iloc[pos])
         if admin:
             if c1.button("+ Adicionar", key="abrir_add_linha"):
                 dlg_add_linha()
@@ -707,7 +963,7 @@ with tab_cadastro:
         else:
             c3.caption("Exclusão: só administradores.")
         if pos is None and not linhas_df.empty:
-            st.caption("Selecione uma linha da tabela para editar ou excluir.")
+            st.caption("Selecione uma linha da tabela para editar ou excluir (ou ver a estrutura).")
 
 with tab_os:
     st.subheader("OS — Acompanhamento")
