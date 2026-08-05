@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Tema base sem ActionBar; o Material3/Compose cuida da aparência real. -->
+    <style name="Theme.IdentificadorNFC" parent="android:Theme.Material.NoActionBar" />
+</resources>

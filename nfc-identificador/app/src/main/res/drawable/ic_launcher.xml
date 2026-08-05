@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Fundo -->
+    <path
+        android:fillColor="#0D47A1"
+        android:pathData="M0,0 h108 v108 h-108 z" />
+    <!-- Cartão -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,42 h26 a6,6 0 0 1 6,6 v12 a6,6 0 0 1 -6,6 h-26 a6,6 0 0 1 -6,-6 v-12 a6,6 0 0 1 6,-6 z M34,48 v12 h26 v-12 z" />
+    <!-- Ondas de sinal NFC -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round"
+        android:pathData="M70,44 a14,14 0 0 1 0,20" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round"
+        android:pathData="M76,38 a22,22 0 0 1 0,32" />
+</vector>
