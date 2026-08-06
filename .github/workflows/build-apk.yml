@@ -1,0 +1,61 @@
+# Build acionado após habilitar o GitHub Actions no repositório (re-disparo).
+name: Gerar APK do Identificador NFC
+
+# Compila o app Android e publica o APK como:
+#  - "artifact" da execução (baixável na aba Actions), e
+#  - asset de um Release fixo "apk-nfc-latest" (link direto, ótimo p/ o celular).
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - claude/nfc-transit-card-app-8usvih
+    paths:
+      - "nfc-identificador/**"
+      - ".github/workflows/build-apk.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Compilar APK (debug)
+        working-directory: nfc-identificador
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Renomear APK
+        run: |
+          cp nfc-identificador/app/build/outputs/apk/debug/app-debug.apk \
+             identificador-nfc.apk
+
+      - name: Publicar como artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: identificador-nfc-apk
+          path: identificador-nfc.apk
+
+      - name: Publicar no Release (link direto)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-nfc-latest
+          name: Identificador NFC (APK mais recente)
+          body: |
+            APK de depuração do app Identificador NFC, gerado automaticamente.
+            Baixe o arquivo `identificador-nfc.apk` abaixo e instale no celular.
+          files: identificador-nfc.apk
+          prerelease: true
