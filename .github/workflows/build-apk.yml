@@ -1,3 +1,4 @@
+# Build acionado após habilitar o GitHub Actions no repositório.
 name: Gerar APK do Identificador NFC
 
 # Compila o app Android e publica o APK como:
